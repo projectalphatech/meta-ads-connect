@@ -13,6 +13,16 @@ command line: it would land in your shell history.
 import argparse, csv, json, os, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import date, timedelta
 
+def read_env():
+    """Load .env from the current folder into os.environ (real env vars win)."""
+    if os.path.exists(".env"):
+        for line in open(".env", encoding="utf-8-sig"):
+            k, _, v = line.strip().partition("=")
+            if k and not k.startswith("#"):
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+read_env()
 API_VERSION = os.environ.get("META_API_VERSION", "v26.0")  # newest as of 2026-11; check the changelog
 BASE = f"https://graph.facebook.com/{API_VERSION}/"
 
@@ -26,7 +36,7 @@ RESULTS = {
 }
 RETRY_CODES = {4, 17, 32, 613, 80000, 80003, 80004, 80014}  # rate limits: wait and retry
 HINTS = {
-    190: "Token expired or invalid. Make a new one (see references/setup.md, step 4).",
+    190: "Token expired or invalid. Make a new one (see steps/02-make-a-token.md).",
     200: "Missing permission. The token needs ads_read, and the ad account must be assigned to it.",
     10: "Missing permission. The token needs ads_read.",
     100: "Bad parameter. Check the account id looks like act_1234567890.",
@@ -34,21 +44,17 @@ HINTS = {
 }
 
 
-def load_token():
-    tok = os.environ.get("META_TOKEN")
-    if not tok and os.path.exists(".env"):
-        for line in open(".env", encoding="utf-8"):
-            k, _, v = line.strip().partition("=")
-            if k == "META_TOKEN":
-                tok = v.strip().strip('"').strip("'")
+def load_token(name="META_TOKEN"):
+    tok = os.environ.get(name)
     if not tok:
-        sys.exit("No token. Put META_TOKEN=... in a .env file here (and add .env to .gitignore).")
+        sys.exit(f"No token. Put {name}=... in a .env file here (and add .env to .gitignore).")
     return tok
 
 
-def get(path, params, token, tries=4):
-    url = path if path.startswith("http") else BASE + path + "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+def get(path, params, token, tries=4, data=None):
+    url = path if path.startswith("http") else BASE + path + ("" if data else "?" + urllib.parse.urlencode(params))
+    body = urllib.parse.urlencode(data).encode() if data else None  # data = POST (only autopilot.py writes)
+    req = urllib.request.Request(url, data=body, headers={"Authorization": f"Bearer {token}"})
     for attempt in range(tries):
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
@@ -82,7 +88,7 @@ def get_all(path, params, token):
 
 def flatten(row):
     """One insights row -> flat dict with result counts and cost per result."""
-    out = {k: row.get(k, "") for k in ("campaign_name", "adset_name", "ad_name", "date_start", "date_stop")}
+    out = {k: row.get(k, "") for k in ("campaign_name", "adset_name", "ad_name", "adset_id", "ad_id", "date_start", "date_stop")}
     spend = float(row.get("spend") or 0)
     out.update(spend=round(spend, 2), impressions=int(row.get("impressions") or 0),
                reach=int(row.get("reach") or 0), ctr=row.get("inline_link_click_ctr", ""), cpm=row.get("cpm", ""))
@@ -110,7 +116,7 @@ def cmd_check(token):
 def cmd_accounts(token):
     rows = get_all("me/adaccounts", {"fields": "name,account_id,currency,account_status,amount_spent", "limit": 100}, token)
     if not rows:
-        print("No ad accounts visible. Assign the ad account to this user/system user (references/setup.md, step 3).")
+        print("No ad accounts visible. Assign the ad account to this user/system user (steps/02-make-a-token.md).")
     status = {1: "active", 2: "disabled", 3: "unsettled", 7: "pending review", 9: "grace period", 101: "closed"}
     for a in rows:
         print(f"act_{a['account_id']}  {a.get('name')}  {a.get('currency')}  {status.get(a.get('account_status'), a.get('account_status'))}")
@@ -121,7 +127,7 @@ def cmd_insights(token, account, days, level, out):
         account = "act_" + account
     until = date.today() - timedelta(days=1)  # yesterday: today is still incomplete
     since = until - timedelta(days=days - 1)
-    fields = "campaign_name,adset_name,ad_name,spend,impressions,reach,inline_link_click_ctr,cpm,actions"
+    fields = "campaign_name,adset_name,ad_name,adset_id,ad_id,spend,impressions,reach,inline_link_click_ctr,cpm,actions"
     params = {"level": level, "fields": fields, "limit": 200,
               "time_range": json.dumps({"since": str(since), "until": str(until)})}
     rows = [flatten(r) for r in get_all(f"{account}/insights", params, token)]
